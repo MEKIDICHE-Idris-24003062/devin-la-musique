@@ -22,11 +22,12 @@ final class Game {
         $pdo = Db::pdo();
         $userId = (int)Auth::user()['id'];
 
-        // Avoid repeating the same track inside the same match
-        $stmtUsed = $pdo->prepare('SELECT track_id FROM games WHERE match_id=:m');
-        $stmtUsed->execute([':m' => $matchId]);
-        $usedTrackIds = $stmtUsed->fetchAll(PDO::FETCH_COLUMN);
-        $usedTrackIds = array_map('intval', $usedTrackIds ?: []);
+        // Solo mode: no "match". Keep a simple running score and avoid repeats during the current session.
+        $score = (int)(UserSettings::get($userId, 'solo_score', '0') ?? '0');
+
+        $usedTrackIds = $_SESSION['solo_used_track_ids'] ?? [];
+        if (!is_array($usedTrackIds)) $usedTrackIds = [];
+        $usedTrackIds = array_values(array_unique(array_map('intval', $usedTrackIds)));
 
         $notIn = '';
         $params = [];
@@ -36,65 +37,46 @@ final class Game {
             $params = $usedTrackIds;
         }
 
-        // pick random enabled track. Each user can choose an active playlist.
+        // pick random enabled track from the user's active playlist ONLY
         $activePlaylistId = (int)(UserSettings::get($userId, 'active_playlist_id', '0') ?? '0');
-        if ($activePlaylistId > 0) {
-            $sql =
-                "SELECT t.*
-                 FROM playlist_tracks pt
-                 JOIN tracks t ON t.id = pt.track_id
-                 WHERE t.enabled=1 AND pt.deezer_playlist_id=? {$notIn}
-                 ORDER BY RANDOM() LIMIT 1";
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute(array_merge([$activePlaylistId], $params));
-            $track = $stmt->fetch(PDO::FETCH_ASSOC);
-        } else {
-            $sql = "SELECT t.* FROM tracks t WHERE t.enabled=1 {$notIn} ORDER BY RANDOM() LIMIT 1";
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($params);
-            $track = $stmt->fetch(PDO::FETCH_ASSOC);
+        if ($activePlaylistId <= 0) {
+            view('play', ['error' => 'Choisis une playlist active pour jouer (Playlists → Sélectionner).']);
+            return;
         }
+
+        $sql =
+            "SELECT t.*
+             FROM playlist_tracks pt
+             JOIN tracks t ON t.id = pt.track_id
+             WHERE t.enabled=1 AND pt.deezer_playlist_id=? {$notIn}
+             ORDER BY RANDOM() LIMIT 1";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute(array_merge([$activePlaylistId], $params));
+        $track = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$track) {
             view('play', ['error' => 'Pas assez de musiques uniques pour compléter la partie (5 manches). Importe une playlist plus grande.']);
             return;
         }
 
-        // ensure a match in progress
-        $matchId = (int)($_SESSION['match_id'] ?? 0);
-        if ($matchId) {
-            $m = $pdo->prepare('SELECT id, played_rounds, finished FROM matches WHERE id=:id AND user_id=:u');
-            $m->execute([':id' => $matchId, ':u' => $userId]);
-            $match = $m->fetch(PDO::FETCH_ASSOC);
-            if (!$match || (int)$match['finished'] === 1) {
-                $matchId = 0;
-                unset($_SESSION['match_id']);
-            }
-        }
-        if (!$matchId) {
-            $pdo->prepare('INSERT INTO matches(user_id) VALUES(:u)')->execute([':u' => $userId]);
-            $matchId = (int)$pdo->lastInsertId();
-            $_SESSION['match_id'] = $matchId;
-        }
-
-        $played = (int)$pdo->query("SELECT played_rounds FROM matches WHERE id={$matchId}")->fetchColumn();
-        $round = $played + 1;
-
-        // create game row for this round
-        $stmt = $pdo->prepare('INSERT INTO games(match_id, round, user_id, track_id, reveals, seconds_revealed) VALUES(:m,:r,:u,:t,0,:s)');
-        $stmt->execute([':m' => $matchId, ':r' => $round, ':u' => $userId, ':t' => (int)$track['id'], ':s' => self::INITIAL_SECONDS]);
+        // create a new game row (no match/round in solo)
+        $stmt = $pdo->prepare('INSERT INTO games(match_id, round, user_id, track_id, reveals, seconds_revealed) VALUES(NULL,NULL,:u,:t,0,:s)');
+        $stmt->execute([':u' => $userId, ':t' => (int)$track['id'], ':s' => self::INITIAL_SECONDS]);
         $gameId = (int)$pdo->lastInsertId();
+
+        // remember used track ids for this session
+        $usedTrackIds[] = (int)$track['id'];
+        $_SESSION['solo_used_track_ids'] = $usedTrackIds;
 
         $_SESSION['game_id'] = $gameId;
 
         view('play', [
             'track' => $track,
             'gameId' => $gameId,
-            'round' => $round,
-            'roundsTotal' => self::ROUNDS_PER_MATCH,
             'clipSeconds' => self::INITIAL_SECONDS,
             'maxSeconds' => self::MAX_SECONDS,
             'pointsNow' => self::pointsNow(0),
+            'score' => $score,
         ]);
     }
 
@@ -226,57 +208,12 @@ final class Game {
             ':id' => $gameId,
         ]);
 
-        // Update match progression
-        $matchId = (int)($game['match_id'] ?? 0);
-        if ($matchId) {
-            $pdo->prepare('UPDATE matches SET played_rounds = played_rounds + 1, total_points = total_points + :p WHERE id=:m AND user_id=:u')
-                ->execute([':p' => $final, ':m' => $matchId, ':u' => (int)Auth::user()['id']]);
+        // Solo mode: keep a running total score and always show it
+        $userId = (int)Auth::user()['id'];
+        $totalBefore = (int)(UserSettings::get($userId, 'solo_score', '0') ?? '0');
+        $totalAfter = $totalBefore + $final;
+        UserSettings::set($userId, 'solo_score', (string)$totalAfter);
 
-            $m = $pdo->prepare('SELECT played_rounds, total_points FROM matches WHERE id=:m');
-            $m->execute([':m' => $matchId]);
-            $mrow = $m->fetch(PDO::FETCH_ASSOC);
-            $played = (int)($mrow['played_rounds'] ?? 0);
-            $total = (int)($mrow['total_points'] ?? 0);
-
-            // clear current game
-            unset($_SESSION['game_id']);
-
-            if ($played < self::ROUNDS_PER_MATCH) {
-                // Next round
-                view('result', [
-                    'track' => $track,
-                    'titleOk' => $titleOk,
-                    'artistOk' => $artistOk,
-                    'final' => $final,
-                    'pointsBefore' => $points,
-                    'nextRound' => $played + 1,
-                    'roundsTotal' => self::ROUNDS_PER_MATCH,
-                    'totalSoFar' => $total,
-                ]);
-                return;
-            }
-
-            // Finish match
-            $won = $total >= self::WIN_THRESHOLD;
-            $pdo->prepare('UPDATE matches SET finished=1, won=:w WHERE id=:m')->execute([':w' => $won ? 1 : 0, ':m' => $matchId]);
-
-            // clear match
-            unset($_SESSION['match_id']);
-
-            $stmt = $pdo->prepare('SELECT g.round, g.points, t.artist, t.title FROM games g JOIN tracks t ON t.id=g.track_id WHERE g.match_id=:m ORDER BY g.round ASC');
-            $stmt->execute([':m' => $matchId]);
-            $rounds = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-            view('match_end', [
-                'total' => $total,
-                'threshold' => self::WIN_THRESHOLD,
-                'won' => $won,
-                'rounds' => $rounds,
-            ]);
-            return;
-        }
-
-        // Fallback (no match): behave like old single round
         unset($_SESSION['game_id']);
         view('result', [
             'track' => $track,
@@ -284,6 +221,7 @@ final class Game {
             'artistOk' => $artistOk,
             'final' => $final,
             'pointsBefore' => $points,
+            'totalScore' => $totalAfter,
         ]);
     }
 

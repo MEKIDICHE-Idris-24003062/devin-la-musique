@@ -1,4 +1,4 @@
-let state = { clipSeconds: 0, lastStop: 0 };
+let state = { clipSeconds: 0, lastStop: 0, playing: false };
 
 function post(path, data) {
   return fetch(path, {
@@ -6,6 +6,14 @@ function post(path, data) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(data)
   });
+}
+
+function stopPlayback() {
+  const audio = document.getElementById('preview');
+  if (!audio) return;
+  window.clearTimeout(audio.__dlmTimeout);
+  try { audio.pause(); } catch (_) {}
+  state.playing = false;
 }
 
 function playSegment(startSeconds, endSeconds) {
@@ -21,12 +29,14 @@ function playSegment(startSeconds, endSeconds) {
       audio.currentTime = startSeconds;
     } catch (_) {}
 
+    state.playing = true;
     audio.play();
 
     window.clearTimeout(audio.__dlmTimeout);
     audio.__dlmTimeout = window.setTimeout(() => {
       try { audio.pause(); } catch (_) {}
       state.lastStop = endSeconds;
+      state.playing = false;
     }, clipMs);
   };
 
@@ -73,6 +83,12 @@ document.addEventListener('click', async (e) => {
   if (playBtn) {
     e.preventDefault();
     playClipFromStart();
+  }
+
+  const pauseBtn = e.target.closest('[data-action="pauseclip"]');
+  if (pauseBtn) {
+    e.preventDefault();
+    stopPlayback();
   }
 });
 

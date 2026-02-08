@@ -1,5 +1,9 @@
 <div class="card">
-  <h2>Partie<?php if (!empty($round)): ?> — Manche <?= (int)$round ?>/<?= (int)$roundsTotal ?><?php endif; ?></h2>
+  <h2>Partie</h2>
+
+  <?php if (isset($score)): ?>
+    <p>Score : <span class="badge"><?= (int)$score ?></span></p>
+  <?php endif; ?>
 
   <?php if (!empty($error)): ?>
     <p style="color:#ffb4b4"><?= htmlspecialchars($error) ?></p>
@@ -14,17 +18,14 @@
     </p>
 
     <?php $previewUrl = '/preview?id=' . (int)$track['id']; ?>
-    <audio id="preview" controls preload="none" data-clip-seconds="<?= (int)$clipSeconds ?>">
+    <!-- Audio element kept for JS playback, but native controls are hidden to prevent manual play -->
+    <audio id="preview" preload="none" data-clip-seconds="<?= (int)$clipSeconds ?>" style="display:none">
       <source src="<?= htmlspecialchars($previewUrl) ?>" type="audio/mpeg" />
       Ton navigateur ne supporte pas l’audio.
     </audio>
-    <div class="row" style="align-items:center">
-      <a class="badge" href="<?= htmlspecialchars($previewUrl) ?>" target="_blank" rel="noreferrer">Ouvrir l’audio (preview)</a>
-      <small class="muted" style="word-break:break-all">Source: <?= htmlspecialchars($previewUrl) ?></small>
-    </div>
-
     <p class="row">
       <button class="primary" data-action="playclip">Écouter l’extrait</button>
+      <button data-action="pauseclip">Pause</button>
       <button data-action="reveal" data-csrf="<?= htmlspecialchars(csrf_token()) ?>">Découvrir plus (-points)</button>
       <a class="badge" href="/play">Nouvelle musique</a>
     </p>
