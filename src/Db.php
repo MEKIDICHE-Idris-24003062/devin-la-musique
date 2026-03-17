@@ -10,6 +10,34 @@ final class Db {
     private static ?PDO $pdo = null;
 
     public static function init(): void {
+        $driver = Env::get('DB_DRIVER', 'sqlite');
+
+        if ($driver === 'mysql') {
+            $host = Env::get('DB_HOST');
+            $port = Env::get('DB_PORT', '3306');
+            $name = Env::get('DB_NAME');
+            $user = Env::get('DB_USER');
+            $pass = Env::get('DB_PASSWORD', '');
+
+            if (!$host || !$name || !$user) {
+                throw new \RuntimeException('Missing DB_HOST/DB_NAME/DB_USER for MySQL');
+            }
+
+            $dsn = "mysql:host={$host};port={$port};dbname={$name};charset=utf8mb4";
+            self::$pdo = new PDO($dsn, $user, $pass, [
+                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+                PDO::ATTR_EMULATE_PREPARES => false,
+            ]);
+
+            // Ensure FK constraints are enforced (default in InnoDB, but keep explicit).
+            self::$pdo->exec('SET sql_mode = CONCAT(@@sql_mode, ",STRICT_ALL_TABLES")');
+
+            self::migrateMySql();
+            return;
+        }
+
+        // Default: SQLite (local dev)
         $path = Env::get('DB_PATH', __DIR__ . '/../data/app.db');
         $dir = dirname((string)$path);
         if (!is_dir($dir)) {
@@ -20,7 +48,7 @@ final class Db {
         self::$pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         self::$pdo->exec('PRAGMA foreign_keys = ON;');
 
-        self::migrate();
+        self::migrateSqlite();
     }
 
     public static function pdo(): PDO {
@@ -28,7 +56,7 @@ final class Db {
         return self::$pdo;
     }
 
-    private static function migrate(): void {
+    private static function migrateSqlite(): void {
         // If schema changed (YouTube -> Deezer), we need to rebuild the tracks table.
         // We keep it simple: rename old table and create the new one.
         $pdo = self::$pdo;
@@ -78,6 +106,13 @@ final class Db {
 
         $sql = file_get_contents(__DIR__ . '/../data/schema.sql');
         if ($sql === false) throw new \RuntimeException('schema.sql missing');
+        $pdo->exec($sql);
+    }
+
+    private static function migrateMySql(): void {
+        $pdo = self::$pdo;
+        $sql = file_get_contents(__DIR__ . '/../data/schema.mysql.sql');
+        if ($sql === false) throw new \RuntimeException('schema.mysql.sql missing');
         $pdo->exec($sql);
     }
 }
